@@ -1,0 +1,188 @@
+# Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Parameters:
+
+  S3ConfigStackName:
+    Description: Stack name which has all of the S3 configuration
+    Type: String
+
+  BranchName:
+    Description: Branch name to trigger pipeline
+    Type: String
+
+  RepoName:
+    Description: CodeCommit Repo Name to monitor
+    Type: String
+
+  AppPath:
+    Description: App configuration directory
+    Type: String
+
+  CodePipelinePath:
+    Description: Codepipeline directory
+    Type: String
+
+  LambdaContainerImagePipelineName:
+    Description: Docker deployment pipeline name
+    Type: String
+
+  LambdaContainerCodeBuildProjectName:
+    Description: Lambda container project name
+    Type: String
+
+Resources:
+
+  AmazonCloudWatchEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref ContainerImageDeploymentPipeline ] ]
+
+  AmazonCloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - 'CodeCommit Repository State Change'
+        resources:
+          - Fn::ImportValue: !Sub "${S3ConfigStackName}-Demo-Repo-Name"
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref BranchName
+      Targets:
+        -
+          Arn:
+            !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref ContainerImageDeploymentPipeline ] ]
+          RoleArn: !GetAtt AmazonCloudWatchEventRole.Arn
+          Id: !Ref ContainerImageDeploymentPipeline
+
+  ContainerBuildCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+        Name: !Ref LambdaContainerCodeBuildProjectName
+        Description: CodeBuild Project to build and deploy the container to ECR.
+        Artifacts:
+          Type: CODEPIPELINE
+        Environment:
+            Type: LINUX_CONTAINER
+            ComputeType: BUILD_GENERAL1_SMALL
+            PrivilegedMode: true
+            # With the image below we must specify a runtime-version in the Buildspec (see below)
+            Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+            EnvironmentVariables:
+              - Name: APPPATH
+                Value: !Ref AppPath
+              - Name: ACCOUNTID
+                Value: !Ref 'AWS::AccountId'
+              - Name: CODEPIPELINEPATH
+                Value: !Ref CodePipelinePath
+              - Name: ECRNAME
+                Value:
+                  Fn::ImportValue: !Sub "${S3ConfigStackName}-ECR-Name"
+        ServiceRole:
+          Fn::ImportValue: !Sub "${S3ConfigStackName}-Code-Build-Role-ARN"
+        Source:
+            Type: CODEPIPELINE
+            BuildSpec: |
+              version: 0.2
+              phases:
+                build:
+                  commands:
+                    - IMAGEVERISON=$(<codepipeline/version.txt)
+                    - echo $IMAGEVERISON
+                    - sh codepipeline/version.sh
+                    - echo $IMAGEVERISON
+                    - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ACCOUNTID.dkr.ecr.us-east-1.amazonaws.com
+                    - docker build $APPPATH/ -t demo-java
+                    - docker tag demo-java:latest $ACCOUNTID.dkr.ecr.us-east-1.amazonaws.com/demo-java:${IMAGEVERISON}
+                    - docker push $ACCOUNTID.dkr.ecr.us-east-1.amazonaws.com/demo-java:${IMAGEVERISON}
+
+  ContainerImageDeploymentPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref LambdaContainerImagePipelineName
+      RoleArn:
+        Fn::ImportValue: !Sub "${S3ConfigStackName}-Pipeline-Service-Role-ARN"
+      Stages:
+        -
+          Name: Source
+          Actions:
+            -
+              Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceZip
+              Configuration:
+                RepositoryName: !Ref RepoName
+                BranchName: !Ref BranchName
+                PollForSourceChanges: 'false'
+              RunOrder: 1
+        -
+          Name: BuildAndDeployImage
+          Actions:
+            -
+              Name: BuildAndDeployApp
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref ContainerBuildCodeBuildProject
+              InputArtifacts:
+                - Name: SourceZip
+              OutputArtifacts:
+                - Name: CfnLintZip
+              RunOrder: 2
+      ArtifactStore:
+        Type: S3
+        Location:
+          Fn::ImportValue: !Sub "${S3ConfigStackName}-Bucket-Name"
+
+Outputs:
+
+  PipelineName:
+    Value: !Ref ContainerImageDeploymentPipeline
+    Export:
+      Name: !Sub "${AWS::StackName}-pipeline-name"

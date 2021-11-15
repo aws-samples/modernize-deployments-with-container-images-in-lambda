@@ -1,0 +1,401 @@
+# Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  This template creates the roles utilized for setting up the
+  Docker Image Builder Pipeline.
+
+Parameters:
+
+  Namespace:
+    Description: A prefix used to name provisioned resources
+    Type: String
+
+  ECRName:
+    Type: String
+    Description: Elastic Container Registry name
+
+Resources:
+
+# S3 Bucket where demo config files will live.
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  ImageBuilderRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ECRName
+
+# Build Role for AWS Lambda functions
+  LambdaBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Namespace}-LambdaBuildRole"
+      Description: 'This role will build and deploy lambda functions from CodePipeline'
+      MaxSessionDuration: 3600 # in seconds
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+                - codepipeline.amazonaws.com
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+# Execution Role for AWS Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Namespace}-LambdaExecutionRole"
+      Description: 'This role will enable Lambda functions to execute'
+      MaxSessionDuration: 3600 # in seconds
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+# Service Role for AWS CodePipeline
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Namespace}-CodePipelineRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Action:
+            - 'sts:AssumeRole'
+          Effect: Allow
+          Principal:
+            Service:
+              - codepipeline.amazonaws.com
+              - codebuild.amazonaws.com
+      Path: /
+
+  CodeBuildPipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Namespace}-CodeBuildPipelineRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Action:
+            - 'sts:AssumeRole'
+          Effect: Allow
+          Principal:
+            Service:
+              - codepipeline.amazonaws.com
+              - codebuild.amazonaws.com
+      Path: /
+
+# IAM Policy for IAM and ECR
+  ECRAuthPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Namespace}-ECRAuthPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - 'ecr:GetAuthorizationToken'
+          Resource: '*'
+      Roles:
+        - !Ref CodePipelineServiceRole
+        - !Ref LambdaBuildRole
+        - !Ref CodeBuildPipelineRole
+
+
+# IAM Policy for IAM and ECR
+  IAMPassRolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Namespace}-IAMPassRolePolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - 'iam:PassRole'
+            - 'iam:GetRole'
+          Resource:
+            - !Sub 'arn:aws:codebuild:us-east-1:${AWS::AccountId}:lambda-deploy-project/*'
+            - !Sub 'arn:aws:codebuild:us-east-1:${AWS::AccountId}:container-code-build-project/*'
+            - !GetAtt LambdaBuildRole.Arn
+            - !GetAtt LambdaExecutionRole.Arn
+      Roles:
+        - !Ref CodePipelineServiceRole
+        - !Ref LambdaBuildRole
+        - !Ref CodeBuildPipelineRole
+
+# IAM Policy for CloudFormation
+  CloudFormationPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Namespace}-CloudFormationPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - 'cloudformation:DescribeStacks'
+            - 'cloudformation:DescribeChangeSet'
+            - 'cloudformation:GetTemplateSummary'
+            - 'cloudformation:DescribeStackEvents'
+            - 'cloudformation:CreateChangeSet'
+            - 'cloudformation:ExecuteChangeSet'
+          Resource:
+            - !Sub 'arn:aws:cloudformation:us-east-1:${AWS::AccountId}:*'
+            - !Sub 'arn:aws:cloudformation:us-east-1:aws:transform/*'
+      Roles:
+        - !Ref CodePipelineServiceRole
+        - !Ref LambdaBuildRole
+        - !Ref CodeBuildPipelineRole
+
+# IAM Policies for CodePipeline and CodeBuild
+  SAMPipelinePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Namespace}-SAMPipelinePolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - 'lambda:GetFunction'
+            - 'lambda:CreateFunction'
+            - 'lambda:GetFunctionConfiguration'
+            - 'lambda:GetFunction'
+            - 'lambda:ListVersionsByFunction'
+            - 'lambda:PublishVersion'
+            - 'lambda:DeleteFunction'
+            - 'lambda:DeleteAlias'
+            - 'lambda:CreateAlias'
+            - 'lambda:AddPermission'
+            - 'apigateway:POST'
+            - 'apigateway:PUT'
+            - 'apigateway:GET'
+            - 'apigateway:PATCH'
+            - 'apigateway:DELETE'
+          Resource:
+            - !Sub 'arn:aws:lambda:us-east-1:${AWS::AccountId}:function:MyCustomLambdaContainer'
+            - !Sub 'arn:aws:lambda:us-east-1:${AWS::AccountId}:function:MyCustomLambdaContainer:*'
+            - !Sub 'arn:aws:apigateway:us-east-1::/restapis/*'
+            - !Sub 'arn:aws:apigateway:us-east-1::/restapis'
+      Roles:
+        - !Ref LambdaBuildRole
+        - !Ref CodeBuildPipelineRole
+
+# IAM Policy for CloudWatch
+  CodeBuildLogsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Namespace}-CodeBuildLogsPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - 'logs:CreateLogGroup'
+            - 'logs:CreateLogStream'
+            - 'logs:PutLogEvents'
+          Resource:
+            - !Sub 'arn:aws:logs:us-east-1:${AWS::AccountId}:*/*'
+      Roles:
+        - !Ref CodePipelineServiceRole
+        - !Ref LambdaBuildRole
+        - !Ref CodeBuildPipelineRole
+        - !Ref LambdaExecutionRole
+
+# IAM Policy for S3
+  CodePipelineArtifactsS3BucketObjectsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Namespace}-CodePipelineArtifactsS3BucketObjectsPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - 's3:GetObject*'
+            - 's3:PutObject*'
+            - 's3:GetBucketVersioning'
+          Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
+      Roles:
+        - !Ref CodePipelineServiceRole
+        - !Ref LambdaBuildRole
+        - !Ref CodeBuildPipelineRole
+
+# IAM Policy for ECR
+  ECRPermissionsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Namespace}-ECRAccessPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - 'ecr:ListImages'
+            - 'ecr:DescribeImages'
+            - 'ecr:DescribeRegistry'
+            - 'ecr:InitiateLayerUpload'
+            - 'ecr:UploadLayerPart'
+            - 'ecr:CompleteLayerUpload'
+            - 'ecr:BatchCheckLayerAvailability'
+            - 'ecr:PutImage'
+            - 'ecr:GetRepositoryPolicy'
+            - 'ecr:SetRepositoryPolicy'
+          Resource: !Sub 'arn:aws:ecr:us-east-1:${AWS::AccountId}:repository/${ImageBuilderRepository}'
+      Roles:
+        - !Ref CodePipelineServiceRole
+        - !Ref LambdaBuildRole
+        - !Ref CodeBuildPipelineRole
+
+# IAM Policy for CodeCommit
+  CodePipelineCodeCommitPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Namespace}-CodePipelineCodeCommitPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - 'codecommit:GetBranch'
+            - 'codecommit:GetCommit'
+            - 'codecommit:UploadArchive'
+            - 'codecommit:GetUploadArchiveStatus'
+            - 'codecommit:GitPull'
+            - 'codecommit:GitPush'
+            - 'codecommit:GetRepository'
+          Resource:
+            - !Sub 'arn:aws:codecommit:us-east-1:${AWS::AccountId}:${DemoRepo.Name}'
+      Roles:
+        - !Ref CodePipelineServiceRole
+        - !Ref LambdaBuildRole
+        - !Ref CodeBuildPipelineRole
+
+# IAM Policy for CodePipeline and CodeBuild
+  CodePipelineBasePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${Namespace}-CodePipelineBase"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action:
+            - 'codepipeline:List*'
+            - 'codepipeline:Get*'
+            - 'codepipeline:List*'
+            - 'codepipeline:StartPipelineExecution'
+            - 'codepipeline:StopPipelineExecution'
+            - 'codepipeline:RetryStageExecution'
+            - 'codepipeline:UpdatePipeline'
+            - 'codepipeline:CreatePipeline'
+            - 'codepipeline:DeletePipeline'
+            - 'codepipeline:TagResource'
+            - 'codepipeline:UntagResource'
+            - 'codepipeline:EnableStageTransition'
+            - 'codepipeline:DisableStageTransition'
+            - 'codepipeline:PollForJobs'
+            - 'codepipeline:PutActionRevision'
+            - 'codepipeline:PutApprovalResult'
+            - 'codepipeline:PutJobFailureResult'
+            - 'codepipeline:PutJobSuccessResult'
+            - 'codepipeline:List*'
+            - 'codebuild:StartBuild'
+            - 'codebuild:BatchGetBuilds'
+          Resource:
+            - !Sub 'arn:aws:codebuild:us-east-1:${AWS::AccountId}:*/*'
+            - !Sub 'arn:aws:codepipeline:us-east-1:${AWS::AccountId}:*/*'
+      Roles:
+        - !Ref CodePipelineServiceRole
+        - !Ref LambdaBuildRole
+        - !Ref CodeBuildPipelineRole
+
+  DemoRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: DemoRepo
+      RepositoryDescription: 'This is a repository for the docker image builder pipeline.'
+
+Outputs:
+
+  DemoRepo:
+    Value: !GetAtt DemoRepo.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-Demo-Repo-Name"
+
+  CodePipelineServiceRoleArn:
+    Value: !GetAtt CodePipelineServiceRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-Pipeline-Service-Role-ARN"
+
+  CodeBuildPipelineRoleArn:
+    Value: !GetAtt CodeBuildPipelineRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-Code-Build-Role-ARN"
+
+  LambdaBuildRoleArn:
+    Value: !GetAtt LambdaBuildRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-Lambda-Build-Role-ARN"
+
+  LambdaExecutionRoleArn:
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-Lambda-Execution-Role-ARN"
+
+  S3BucketArn:
+    Description: S3 Bucket ARN
+    Value: !GetAtt S3Bucket.Arn
+    Export:
+      Name:
+        Fn::Sub: "${AWS::StackName}-Bucket-ARN"
+
+  S3BucketName:
+    Description: S3 Bucket Name
+    Value: !Ref S3Bucket
+    Export:
+      Name:
+        Fn::Sub: "${AWS::StackName}-Bucket-Name"
+
+  ImageBuilderRepositoryName:
+    Description: ECR Name
+    Value: !Ref ImageBuilderRepository
+    Export:
+      Name:
+        Fn::Sub: "${AWS::StackName}-ECR-Name"

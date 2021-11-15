@@ -1,0 +1,182 @@
+# Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Parameters:
+
+  S3ConfigStackName:
+    Description: Stack name which has all of the S3 configuration
+    Type: String
+
+  ImageDeployPipelineStackName:
+    Description: Image Deployment Pipeline
+    Type: String
+    Default: container-image-deployment-pipeline
+
+  BranchName:
+    Description: Branch name to trigger pipeline
+    Type: String
+    Default: main
+
+  RepoName:
+    Description: CodeCommit Repo Name to monitor
+    Type: String
+
+  LambdaPath:
+    Description: Lambda application config directory
+    Type: String
+    Default: lambda
+
+  DemoAppStackName:
+    Description: Demo Java application CloudFormation stack name
+    Type: String
+    Default: demo-java-app
+
+  SAMDeploymentPipelineName:
+    Description: SAM deployment pipeline name
+    Type: String
+    Default: sam-deployment-pipeline
+
+  SAMCodeBuildProjectName:
+    Description: SAM CodeBuild project name
+    Type: String
+    Default: sam-code-build-project
+
+
+Resources:
+
+  PipelineImageCWERole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName: sam-deploy-cwe-pipeline-execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource: !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref SAMDeploymentPipeline ] ]
+
+  SAMCWERule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.codepipeline
+        detail-type:
+          - 'CodePipeline Pipeline Execution State Change'
+        detail:
+          state:
+            - SUCCEEDED
+          pipeline:
+            - Fn::ImportValue: !Sub "${ImageDeployPipelineStackName}-pipeline-name"
+      Targets:
+        -
+          Arn:
+            !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref SAMDeploymentPipeline ] ]
+          RoleArn: !GetAtt PipelineImageCWERole.Arn
+          Id: !Ref SAMDeploymentPipeline
+
+  SAMCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+        Name: !Ref SAMCodeBuildProjectName
+        Description: CodeBuild Project to deploy the lambda container image to Lambda using SAM.
+        Artifacts:
+          Type: CODEPIPELINE
+        Environment:
+            Type: LINUX_CONTAINER
+            ComputeType: BUILD_GENERAL1_SMALL
+            PrivilegedMode: true
+            # With the image below we must specify a runtime-version in the Buildspec (see below)
+            Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+            EnvironmentVariables:
+              - Name: ACCOUNTID
+                Value: !Ref 'AWS::AccountId'
+              - Name: ECRNAME
+                Value:
+                  Fn::ImportValue: !Sub "${S3ConfigStackName}-ECR-Name"
+              - Name: LAMBDAPATH
+                Value: !Ref LambdaPath
+              - Name: STACKNAME
+                Value: !Ref DemoAppStackName
+        ServiceRole:
+          Fn::ImportValue: !Sub "${S3ConfigStackName}-Code-Build-Role-ARN"
+        Source:
+            Type: CODEPIPELINE
+            BuildSpec: |
+              version: 0.2
+              phases:
+                build:
+                  commands:
+                    - IMAGEVERISON=$(<codepipeline/version.txt)
+                    - sam deploy --config-file $LAMBDAPATH/samconfig.toml --template-file $LAMBDAPATH/template.yml --stack-name $STACKNAME --image-repository $ACCOUNTID.dkr.ecr.us-east-1.amazonaws.com/${ECRNAME} --capabilities CAPABILITY_NAMED_IAM --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides Version=$IMAGEVERISON
+
+  SAMDeploymentPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref SAMDeploymentPipelineName
+      RoleArn:
+        Fn::ImportValue: !Sub "${S3ConfigStackName}-Pipeline-Service-Role-ARN"
+      Stages:
+        -
+          Name: Source
+          Actions:
+            -
+              Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceZip
+              Configuration:
+                RepositoryName: !Ref RepoName
+                BranchName: !Ref BranchName
+                PollForSourceChanges: 'false'
+              RunOrder: 1
+        -
+          Name: SAMDeployLambdaFunction
+          Actions:
+            -
+              Name: BuildAndDeployApp
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref SAMCodeBuildProject
+              InputArtifacts:
+                - Name: SourceZip
+              OutputArtifacts:
+                - Name: CfnLintZip
+              RunOrder: 2
+      ArtifactStore:
+        Type: S3
+        Location:
+          Fn::ImportValue: !Sub "${S3ConfigStackName}-Bucket-Name"

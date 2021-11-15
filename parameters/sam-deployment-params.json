@@ -1,0 +1,30 @@
+[
+  {
+  	"ParameterKey": "S3ConfigStackName",
+  	"ParameterValue": "s3-iam-config"
+  },
+  {
+  	"ParameterKey": "ImageDeployPipelineStackName",
+  	"ParameterValue": "lambda-container-pipeline"
+  },
+  {
+  	"ParameterKey": "BranchName",
+  	"ParameterValue": "main"
+  },
+  {
+  	"ParameterKey": "RepoName",
+  	"ParameterValue": "DemoRepo"
+  },
+  {
+  	"ParameterKey": "LambdaPath",
+  	"ParameterValue": "lambda"
+  },
+  {
+  	"ParameterKey": "DemoAppStackName",
+  	"ParameterValue": "demo-java-app"
+  },
+  {
+  	"ParameterKey": "SAMDeploymentPipelineName",
+  	"ParameterValue": "sam-deployment-pipeline"
+  }
+]
